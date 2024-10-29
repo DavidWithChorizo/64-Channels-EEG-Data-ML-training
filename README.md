@@ -26,6 +26,11 @@
 
 Welcome to the **EEG Movement Intention Interpretation** project! This project aims to develop a machine learning model that accurately interprets the intention of movement from EEG (Electroencephalogram) readings. By analyzing EEG data collected from individuals, the model seeks to predict movement intentions, which has applications in neuroprosthetics, brain-computer interfaces, and cognitive neuroscience research.
 
+
+## Requirements.txt
+The package versions in the requirements.txt are the latest version of all the packages as of 29th of October 2024.
+
+
 ## Dataset
 
 ### Overview
