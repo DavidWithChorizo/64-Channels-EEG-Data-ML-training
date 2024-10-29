@@ -1,0 +1,32 @@
+# Data Manipulation & Analysis
+numpy
+pandas
+
+# EEG Data Processing
+mne
+
+# Machine Learning
+scikit-learn
+tensorflow
+keras
+
+# Visualization
+matplotlib
+seaborn
+
+# Scientific Computing
+scipy
+
+# Utility
+joblib
+
+# Testing
+pytest
+
+# Development Tools
+jupyter
+
+# Additional Dependencies
+h5py
+pydot
+graphviz
