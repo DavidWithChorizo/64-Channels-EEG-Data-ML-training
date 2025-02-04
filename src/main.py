@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 """
-A complete EEG motor-imagery ML software:
-- Loads EDF files (and matching event files) from a raw data directory.
-- Processes and epochs the data.
-- Extracts features using a custom Filter Bank Common Spatial Pattern (FBCSP) transformer.
+A complete EEG motor-imagery ML software that:
+- Loads EDF files from a raw data directory (e.g., S001R04.edf).
+- Processes and epochs the data using MNE.
+- Applies separate filter bank transformations for multiple frequency bands.
+- Uses a Filter Bank CSP (FBCSP) approach (now split into FilterBankTransformer + CSP).
 - Builds an ML pipeline with an MLPClassifier.
 - Evaluates the overall accuracy.
+
+Usage:
+    python script_name.py
 """
 
 import os
@@ -18,56 +22,112 @@ import pandas as pd
 import mne
 from mne import Epochs
 from mne.decoding import CSP
-from mne.filter import filter_data
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score
 
-# Configure logging for debugging and info
+###############################################################################
+# LOGGING CONFIGURATION
+###############################################################################
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 ###############################################################################
-# CUSTOM TRANSFORMER: Filter Bank Common Spatial Pattern (FBCSP)
+# FILTER BANK TRANSFORMER
 ###############################################################################
-class FBCSP(BaseEstimator, TransformerMixin):
+class FilterBankTransformer(BaseEstimator, TransformerMixin):
     """
-    Filter Bank Common Spatial Pattern (FBCSP) transformer.
-
-    Applies a series of band-pass filters to EEG data, fits a Common Spatial Pattern (CSP)
-    for each frequency band, and then transforms the data to a feature space via log-variance
-    of the CSP components.
+    Applies multiple band-pass filters to EEG data and returns a list of filtered signals.
+    Each item in the list corresponds to one frequency band.
 
     Parameters
     ----------
     freq_bands : list of tuple
-        List of frequency bands (l_freq, h_freq) to filter the data.
-    n_csp : int, optional
-        Number of CSP components per band (default is 4).
-    sfreq : float, optional
-        Sampling frequency of the EEG data (default is 160 Hz).
-    filter_method : str, optional
-        Filtering method to use ('iir' or 'fir', default is 'iir').
-    csp_reg : None or str or float, optional
-        Regularization parameter for CSP. Examples: None, 'ledoit_wolf', 'oas', or a float value.
+        Each tuple is (l_freq, h_freq), the lower and upper frequency for a band-pass filter.
+    sfreq : float
+        Sampling frequency of the EEG data.
+    filter_method : str
+        Method to use for filtering ('iir' or 'fir').
     """
-    def __init__(self, freq_bands, n_csp=4, sfreq=160, filter_method='iir', csp_reg=None):
+    def __init__(self, freq_bands, sfreq=160, filter_method='iir'):
         self.freq_bands = freq_bands
-        self.n_csp = n_csp
         self.sfreq = sfreq
         self.filter_method = filter_method
-        self.csp_reg = csp_reg
-        self.csp_list_ = []
 
-    def fit(self, X, y):
+    def fit(self, X, y=None):
         """
-        Fit CSP models for each specified frequency band.
+        No fitting needed for a simple filter step.
+        """
+        return self
+
+    def transform(self, X):
+        """
+        Band-pass filter the data for each specified frequency band.
 
         Parameters
         ----------
         X : np.ndarray, shape (n_trials, n_channels, n_times)
-            EEG data.
+
+        Returns
+        -------
+        X_filtered_list : list of np.ndarray
+            Each element in the list corresponds to one frequency band.
+            Each element has shape (n_trials, n_channels, n_times).
+        """
+        if X.ndim != 3:
+            raise ValueError(f"X should be 3D (n_trials, n_channels, n_times). Got shape: {X.shape}")
+
+        X_filtered_list = []
+        for (l_freq, h_freq) in self.freq_bands:
+            logging.info(f"Filtering data for band: {l_freq}-{h_freq} Hz")
+            # Filter once per band
+            X_filtered = np.array([
+                mne.filter.filter_data(trial,
+                                       sfreq=self.sfreq,
+                                       l_freq=l_freq,
+                                       h_freq=h_freq,
+                                       method=self.filter_method,
+                                       verbose=False)
+                for trial in X
+            ])
+            X_filtered_list.append(X_filtered)
+
+        return X_filtered_list
+
+
+###############################################################################
+# FBCSP TRANSFORMER (Adapted)
+###############################################################################
+class FBCSP(BaseEstimator, TransformerMixin):
+    """
+    Simplified FBCSP that expects data already filtered per frequency band.
+
+    It applies an MNE CSP transformer to each band, extracting log-variance features
+    (if CSP is initialized with log=True).
+
+    Parameters
+    ----------
+    n_csp : int, optional
+        Number of CSP components per band (default is 4).
+    csp_reg : None or str or float, optional
+        Regularization parameter for CSP. Examples: None, 'ledoit_wolf', 'oas', or a float value.
+    log : bool, optional
+        If True, the CSP transformer will automatically compute the log variance.
+    """
+    def __init__(self, n_csp=4, csp_reg=None, log=True):
+        self.n_csp = n_csp
+        self.csp_reg = csp_reg
+        self.log = log
+        self.csp_list_ = []
+
+    def fit(self, X_list, y):
+        """
+        Fit CSP models for each pre-filtered frequency band.
+
+        Parameters
+        ----------
+        X_list : list of np.ndarray
+            Each element is (n_trials, n_channels, n_times) for a specific frequency band.
         y : np.ndarray, shape (n_trials,)
             Class labels.
 
@@ -76,65 +136,44 @@ class FBCSP(BaseEstimator, TransformerMixin):
         self : object
             The fitted FBCSP transformer.
         """
-        if X.ndim != 3:
-            raise ValueError(f"X should be 3D (n_trials, n_channels, n_times). Got shape: {X.shape}")
-        if X.shape[0] != len(y):
-            raise ValueError("Number of trials in X does not match length of y.")
-
         self.csp_list_ = []
-        for band in self.freq_bands:
-            l_freq, h_freq = band
-            logging.info(f"Fitting CSP for band: {l_freq}-{h_freq} Hz")
-
-            # Band-pass filter the data for the current frequency band
-            X_filtered = np.array([
-                filter_data(trial, sfreq=self.sfreq, l_freq=l_freq, h_freq=h_freq,
-                            method=self.filter_method, verbose=False)
-                for trial in X
-            ])
-
+        for idx, X_band in enumerate(X_list):
+            logging.info(f"Fitting CSP for band index {idx}")
             # Initialize and fit CSP for the current band
-            csp = CSP(n_components=self.n_csp, reg=self.csp_reg, log=True, norm_trace=False)
-            csp.fit(X_filtered, y)
+            csp = CSP(n_components=self.n_csp, reg=self.csp_reg, log=self.log, norm_trace=False)
+            csp.fit(X_band, y)
             self.csp_list_.append(csp)
+
         return self
 
-    def transform(self, X):
+    def transform(self, X_list):
         """
-        Transform EEG data using the fitted CSP models, extracting log-variance features.
+        Transform EEG data using the fitted CSP models, extracting features.
 
         Parameters
         ----------
-        X : np.ndarray, shape (n_trials, n_channels, n_times)
-            EEG data to transform.
+        X_list : list of np.ndarray
+            Each element is (n_trials, n_channels, n_times) for a specific frequency band.
 
         Returns
         -------
         X_features : np.ndarray, shape (n_trials, n_bands * n_csp)
-            Extracted features.
+            Extracted features concatenated across bands.
         """
-        if X.ndim != 3:
-            raise ValueError(f"X should be 3D (n_trials, n_channels, n_times). Got shape: {X.shape}")
         if not self.csp_list_:
             raise RuntimeError("FBCSP has not been fitted yet. Call fit before transform.")
 
         features = []
-        for idx, (l_freq, h_freq) in enumerate(self.freq_bands):
-            logging.info(f"Transforming data for band: {l_freq}-{h_freq} Hz")
+        for idx, X_band in enumerate(X_list):
+            logging.info(f"Transforming data for band index {idx}")
             csp = self.csp_list_[idx]
 
-            X_filtered = np.array([
-                filter_data(trial, sfreq=self.sfreq, l_freq=l_freq, h_freq=h_freq,
-                            method=self.filter_method, verbose=False)
-                for trial in X
-            ])
+            # Apply CSP transformation (log variance if log=True)
+            X_csp = csp.transform(X_band)  # shape: (n_trials, n_components)
+            features.append(X_csp)
 
-            # Apply CSP transformation
-            X_csp = csp.transform(X_filtered)
-            # Extract log-variance features
-            X_logvar = np.log(np.var(X_csp, axis=1)).reshape(-1, 1)
-            features.append(X_logvar)
-        X_features = np.column_stack(features)
+        # Concatenate features across frequency bands
+        X_features = np.concatenate(features, axis=1)  # (n_trials, n_bands*n_csp)
         return X_features
 
 
@@ -161,35 +200,22 @@ def load_file_info(data_dir, desired_runs=('04', '08', '12')):
     if not data_dir.exists():
         raise FileNotFoundError(f"The specified data directory does not exist: {data_dir}")
 
-    # Regular expression to match files (e.g., S001R04.edf, S002R08.edf, S001R012.edf)
+    # Regex to match e.g. S001R04.edf, S002R08.edf, S003R12.edf
     edf_pattern = re.compile(r'^S\d{3}R0?(' + '|'.join(desired_runs) + r')\.edf$', re.IGNORECASE)
     file_info = []
-    processed_subjects = 0
 
     for subject_dir in data_dir.iterdir():
         if subject_dir.is_dir() and re.match(r'^S\d{3}$', subject_dir.name, re.IGNORECASE):
-            processed_subjects += 1
             for file in subject_dir.iterdir():
                 if file.is_file() and edf_pattern.match(file.name):
-                    base_name = file.stem  # e.g., S001R04
-                    event_file = f"{base_name}.edf.event"
-                    event_path = subject_dir / event_file
-                    event_exists = event_path.exists()
                     file_info.append({
                         'subject': subject_dir.name,
                         'edf_file': file.name,
-                        'event_file': event_file,
-                        'event_exists': event_exists,
-                        'edf_path': str(file.resolve()),
-                        'event_path': str(event_path.resolve()) if event_exists else None
+                        'edf_path': str(file.resolve())
                     })
 
     df_files = pd.DataFrame(file_info)
-    logging.info(f"Total subject directories processed: {processed_subjects}")
     logging.info(f"Total matched .edf files: {df_files.shape[0]}")
-    logging.info(f"Number of corresponding event files found: {df_files['event_exists'].sum()}")
-    missing_events = df_files.shape[0] - df_files['event_exists'].sum()
-    logging.info(f"Number of missing event files: {missing_events}")
     return df_files
 
 
@@ -200,9 +226,9 @@ def process_edf_file(row, event_dict, tmin=-0.2, tmax=3.8, baseline=(None, 0)):
     Parameters
     ----------
     row : pandas.Series
-        A row from the file info DataFrame containing paths and metadata.
+        A row from the file info DataFrame containing subject name, file paths, etc.
     event_dict : dict
-        Mapping from annotation keys to numeric event codes.
+        Mapping from annotation keys to numeric event codes (e.g., {'T0': 1, 'T1': 2, 'T2': 3}).
     tmin : float, optional
         Start time (in seconds) before the event (default is -0.2).
     tmax : float, optional
@@ -213,49 +239,54 @@ def process_edf_file(row, event_dict, tmin=-0.2, tmax=3.8, baseline=(None, 0)):
     Returns
     -------
     X : np.ndarray or None
-        The epoched EEG data of shape (n_epochs, n_channels, n_times) or None if processing fails.
+        Epoched EEG data (n_epochs, n_channels, n_times), or None if processing fails.
     y : np.ndarray or None
-        The corresponding labels for each epoch, or None if processing fails.
+        Corresponding labels for each epoch, or None if processing fails.
     """
     edf_path = row['edf_path']
     subject = row['subject']
     edf_file = row['edf_file']
-    event_exists = row['event_exists']
 
     logging.info(f"Processing file: {edf_file} for subject: {subject}")
-    if not event_exists:
-        logging.warning(f"Skipping {edf_file} as it lacks an event file.")
-        return None, None
-
     try:
+        # Read EDF and create raw object
         raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
         # Convert annotations to events using the provided event_dict
         events, _ = mne.events_from_annotations(raw, event_id=event_dict)
+
         if events.size == 0:
             logging.warning(f"No events found in {edf_file}. Skipping.")
             return None, None
 
         # Create epochs around the events
-        epochs = Epochs(raw, events, event_id=event_dict, tmin=tmin, tmax=tmax,
-                        baseline=baseline, preload=True, verbose=False)
+        epochs = Epochs(raw, events, event_id=event_dict,
+                        tmin=tmin, tmax=tmax,
+                        baseline=baseline,
+                        preload=True, verbose=False)
+
         # Select only motor imagery epochs (here T1 and T2)
+        # T1: Imagining Left Hand
+        # T2: Imagining Right Hand
         motor_epochs = epochs[['T1', 'T2']]
         if len(motor_epochs) == 0:
             logging.warning(f"No motor-related epochs found in {edf_file}. Skipping.")
             return None, None
 
-        # Extract labels: 0 for 'T1' (Imagining Left Hand), 1 for 'T2' (Imagining Right Hand)
-        labels = motor_epochs.events[:, -1] - event_dict['T1']
+        # Extract labels: 0 for 'T1', 1 for 'T2' (assuming event_dict={'T0':1,'T1':2,'T2':3})
+        labels = motor_epochs.events[:, -1] - event_dict['T1']  # 2 -> class 0, 3 -> class 1
+
+        # Retrieve epoched data
         X = motor_epochs.get_data()  # shape: (n_epochs, n_channels, n_times)
-        y = labels
+        y = labels.astype(int)
         logging.info(f"Loaded {X.shape[0]} epochs from {edf_file}.")
         return X, y
+
     except Exception as e:
         logging.error(f"Failed to process {edf_file}. Error: {e}")
         return None, None
 
 
-def load_all_data(df_files, event_dict):
+def load_all_data(df_files, event_dict, tmin=-0.2, tmax=3.8, baseline=(None, 0)):
     """
     Process all EDF files from the file info DataFrame and concatenate the results.
 
@@ -265,13 +296,19 @@ def load_all_data(df_files, event_dict):
         DataFrame containing metadata and paths for each EDF file.
     event_dict : dict
         Mapping from annotation keys to numeric event codes.
+    tmin : float
+        Start time for epoching (seconds).
+    tmax : float
+        End time for epoching (seconds).
+    baseline : tuple or None
+        Baseline correction interval.
 
     Returns
     -------
     X_all : np.ndarray
-        Concatenated EEG data from all files, shape (total_epochs, n_channels, n_times).
+        Concatenated EEG data (n_total_epochs, n_channels, n_times).
     y_all : np.ndarray
-        Concatenated labels from all files, shape (total_epochs,).
+        Concatenated labels (n_total_epochs,).
 
     Raises
     ------
@@ -280,13 +317,15 @@ def load_all_data(df_files, event_dict):
     """
     all_epochs = []
     all_labels = []
+
     for idx, row in df_files.iterrows():
-        X, y = process_edf_file(row, event_dict)
+        X, y = process_edf_file(row, event_dict, tmin=tmin, tmax=tmax, baseline=baseline)
         if X is not None and y is not None:
             all_epochs.append(X)
             all_labels.append(y)
+
     if not all_epochs:
-        raise RuntimeError("No valid epochs were loaded. Check your data and event files.")
+        raise RuntimeError("No valid epochs were loaded. Check your data and event labels.")
     X_all = np.concatenate(all_epochs, axis=0)
     y_all = np.concatenate(all_labels, axis=0)
     logging.info(f"Final X_all shape: {X_all.shape}")
@@ -299,12 +338,16 @@ def load_all_data(df_files, event_dict):
 ###############################################################################
 def build_pipeline(freq_bands, n_csp, sfreq, classifier_params=None):
     """
-    Build a machine learning pipeline with the FBCSP transformer and an MLPClassifier.
+    Build a machine learning pipeline with separate filtering and CSP steps.
+
+    1) FilterBankTransformer: filters data into multiple bands
+    2) FBCSP: applies CSP for each band and extracts features
+    3) MLPClassifier: classifies the extracted features
 
     Parameters
     ----------
     freq_bands : list of tuple
-        List of frequency bands for FBCSP.
+        List of frequency bands for filtering (e.g., [(8,12), (12,16), (16,20)]).
     n_csp : int
         Number of CSP components per band.
     sfreq : float
@@ -318,11 +361,14 @@ def build_pipeline(freq_bands, n_csp, sfreq, classifier_params=None):
         The constructed ML pipeline.
     """
     if classifier_params is None:
-        classifier_params = {}  # default parameters for MLPClassifier
-    clf = MLPClassifier(**classifier_params)
+        classifier_params = {}  # default parameters if none provided
+
     pipeline = Pipeline([
-        ('fbcsp', FBCSP(freq_bands=freq_bands, n_csp=n_csp, sfreq=sfreq)),
-        ('clf', clf)
+        ('filter_bank', FilterBankTransformer(freq_bands=freq_bands,
+                                             sfreq=sfreq,
+                                             filter_method='iir')),
+        ('fbcsp', FBCSP(n_csp=n_csp, csp_reg=None, log=True)),
+        ('clf', MLPClassifier(**classifier_params))
     ])
     return pipeline
 
@@ -334,16 +380,16 @@ def evaluate_pipeline(pipeline, X, y):
     Parameters
     ----------
     pipeline : sklearn.pipeline.Pipeline
-        The ML pipeline (should be already fitted).
+        The ML pipeline (should already be fitted).
     X : np.ndarray
-        The input data.
+        Input data, shape: (n_epochs, n_channels, n_times).
     y : np.ndarray
-        The true labels.
+        True labels for each trial.
 
     Returns
     -------
     accuracy : float
-        The overall accuracy of the predictions.
+        Overall accuracy (from 0 to 1).
     """
     y_pred = pipeline.predict(X)
     accuracy = accuracy_score(y, y_pred)
@@ -358,26 +404,30 @@ def main():
     """
     Main function to execute the EEG motor-imagery ML pipeline.
 
-    Steps:
-    1. Define paths and parameters.
-    2. Load file information from the raw data directory.
-    3. Process and load all EEG data and corresponding labels.
-    4. Build the machine learning pipeline.
-    5. Fit the pipeline on the entire dataset.
-    6. Evaluate the pipeline.
+    1) Define paths, event dict, and parameters.
+    2) Load file information from the raw data directory.
+    3) Process and load all EEG data and corresponding labels.
+    4) Build the machine learning pipeline.
+    5) Fit the pipeline on the entire dataset.
+    6) Evaluate the pipeline on the same dataset.
     """
-    # 1. Define paths and parameters
+    # 1. Define paths, event dict, and parameters
     data_directory = '../data/raw data'  # Adjust to your actual data path
-    desired_runs = ('04', '08', '12')
-    # Event dictionary: mapping annotation keys to numeric values
-    event_dict = {'T0': 1, 'T1': 2, 'T2': 3}
+    desired_runs = ('04', '08', '12')    # For example: 04, 08, 12
+    event_dict = {'T0': 1, 'T1': 2, 'T2': 3}  # Adjust if your annotations differ
+
     # Epoch parameters
     tmin, tmax, baseline = -0.2, 3.8, (None, 0)
+
     # Sampling frequency (adjust as needed)
     sfreq = 160
-    # FBCSP parameters
-    freq_bands = [(8, 12), (12, 16), (16, 20)]  # example frequency bands
+
+    # Frequency bands for FilterBankTransformer
+    freq_bands = [(8, 12), (12, 16), (16, 20)]
+
+    # Number of CSP components
     n_csp = 4
+
     # Classifier parameters (for MLPClassifier)
     classifier_params = {
         'hidden_layer_sizes': (100,),
@@ -387,9 +437,11 @@ def main():
 
     # 2. Load file information
     df_files = load_file_info(data_directory, desired_runs=desired_runs)
+    if df_files.empty:
+        raise RuntimeError("No matching EDF files found. Check your data or regex pattern.")
 
-    # 3. Process and load all EEG data and corresponding labels
-    X_all, y_all = load_all_data(df_files, event_dict)
+    # 3. Process and load all EEG data
+    X_all, y_all = load_all_data(df_files, event_dict, tmin=tmin, tmax=tmax, baseline=baseline)
 
     # 4. Build the machine learning pipeline
     pipeline = build_pipeline(freq_bands, n_csp, sfreq, classifier_params)
@@ -399,8 +451,9 @@ def main():
     pipeline.fit(X_all, y_all)
 
     # 6. Evaluate the pipeline
-    evaluate_pipeline(pipeline, X_all, y_all)
+    accuracy = evaluate_pipeline(pipeline, X_all, y_all)
+    logging.info(f"Final accuracy: {accuracy * 100:.2f}%")
 
-
+# Entry point
 if __name__ == '__main__':
     main()
