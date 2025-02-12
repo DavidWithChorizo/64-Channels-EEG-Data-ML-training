@@ -145,3 +145,4 @@ Werkzeug==3.0.6
 wheel==0.44.0
 widgetsnbextension==4.0.13
 wrapt==1.16.0
+tensorflow_scikeras
