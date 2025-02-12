@@ -372,7 +372,8 @@ def main():
 
     # Define the selected channels (example: 8 channels evenly spaced across 64 channels)
     # Adjust these indices as needed to match conventional EEG headset channels.
-    selected_channels = [0, 8, 16, 24, 32, 40, 48, 56]
+    selected_channels = [9,13,22,24,30,38,61,63]
+    # selected_channels = [0, 8, 16, 24, 32, 40, 48, 56]
 
     # Load file information and EEG data
     df_files = load_file_info(data_directory, desired_runs=desired_runs)

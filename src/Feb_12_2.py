@@ -7,14 +7,15 @@ selects a subset of channels (8 out of 64, based on predefined indices that rese
 a conventional EEG headset configuration), and trains an EEGNet model using fixed
 hyperparameters (derived from a previous hyperparameter tuning trial).
 
-The fixed hyperparameters used here are:
-    - dropoutRate: 0.4
-    - kernLength: 64
-    - F1: 16
-    - D: 2
-    - F2: 32
-    - epochs: 100
-    - batch_size: 16
+The EEGNet model is defined using the fixed hyperparameters and compiled using the
+        "dropoutRate": 0.3,
+        "kernLength": 32,
+        "F1": 8,
+        "D": 1,
+        "F2": 16,
+        "epochs": 100,
+        "batch_size": 32
+
 
 The model is trained using an 80/20 train/test split.
 
@@ -225,7 +226,7 @@ class ExpandDimsTransformer(BaseEstimator, TransformerMixin):
 ###############################################################################
 # EEGNET MODEL DEFINITION
 ###############################################################################
-def build_eegnet_model(dropoutRate=0.4, kernLength=64, F1=16, D=2, F2=32,
+def build_eegnet_model(dropoutRate=0.3, kernLength=32, F1=8, D=1, F2=16,
                        input_shape=(8, 641, 1), nb_classes=2):
     """
     Build and compile an EEGNet model with fixed hyperparameters.
@@ -305,7 +306,7 @@ def main():
         logging.info("No GPUs found. Running on CPU.")
 
     # Define selected channel indices (for example, 8 channels evenly spaced in a 64-channel montage)
-    selected_channels = [0, 8, 16, 24, 32, 40, 48, 56]
+    selected_channels = [9,13,22,24,30,38,61,63]
 
     # Load file information and data
     df_files = load_file_info(data_directory, desired_runs=desired_runs)
@@ -328,17 +329,15 @@ def main():
     input_shape = (new_n_channels, n_times, 1)
     logging.info(f"New input shape for EEGNet: {input_shape}, Number of classes: {len(np.unique(y_all))}")
 
-    # Create the final pipeline using fixed hyperparameters (from Trial 6)
-    # Fixed hyperparameters:
-    # dropoutRate = 0.4, kernLength = 64, F1 = 16, D = 2, F2 = 32, epochs = 100, batch_size = 16
+    # Define fixed hyperparameters for the EEGNet model
     fixed_params = {
-        "dropoutRate": 0.4,
-        "kernLength": 64,
-        "F1": 16,
-        "D": 2,
-        "F2": 32,
+        "dropoutRate": 0.3,
+        "kernLength": 32,
+        "F1": 8,
+        "D": 1,
+        "F2": 16,
         "epochs": 100,
-        "batch_size": 16
+        "batch_size": 32
     }
     
     # Build the EEGNet model with the fixed hyperparameters
@@ -373,6 +372,15 @@ def main():
     test_accuracy = pipeline.score(X_test, y_test)
     logging.info(f"Test Accuracy of the final model: {test_accuracy * 100:.2f}%")
     print("Final Test Accuracy: {:.2f}%".format(test_accuracy * 100))
+
+    # Save the final model to disk
+    if test_accuracy > 0.7956:
+        logging.info("Saving the final model to disk...")
+        final_model = pipeline.named_steps['eegnet'].model_
+        final_model.save("final_eegnet_model.h5")
+        logging.info("Model saved to final_eegnet_model.h5")
+
+
 
 if __name__ == '__main__':
     main()
